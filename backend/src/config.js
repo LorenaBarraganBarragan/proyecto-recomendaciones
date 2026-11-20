@@ -68,8 +68,8 @@ export const config = Object.freeze({
     csvPath: str('REVIEWS_CSV_PATH', 'data/reviews.csv'),
     allowSynthetic: bool('ALLOW_SYNTHETIC_REVIEWS', false),
     syntheticRows: int('SYNTHETIC_REVIEW_ROWS', 20000),
-    perProduct: int('REVIEWS_PER_PRODUCT', 20),
-    poolSize: int('REVIEW_POOL_SIZE', 4000),
+    perProduct: int('REVIEWS_PER_PRODUCT', 50),
+    poolSize: int('REVIEW_POOL_SIZE', 50000),
     chunkSize: int('INGEST_CHUNK_SIZE', 1000),
     seed: int('RANDOM_SEED', 42),
     columns: {
@@ -83,9 +83,12 @@ export const config = Object.freeze({
   },
 
   products: {
+    // Endpoint público con 1.000 productos de Best Buy (id, precio, imagen, etc.).
+    dataUrl: str('PRODUCTS_DATA_URL', 'https://raw.githubusercontent.com/luminati-io/Best-Buy-dataset-sample/main/Best-Buy-dataset-sample.csv'),
+    // Respaldo por si el CSV público no está disponible.
     apiUrl: str('PRODUCTS_API_URL', 'https://dummyjson.com/products'),
-    apiLimit: int('PRODUCT_API_LIMIT', 100),
-    count: int('PRODUCT_COUNT', 100),
+    apiLimit: int('PRODUCT_API_LIMIT', 0),
+    count: int('PRODUCT_COUNT', 1000),
   },
 
   kafka: {
@@ -109,6 +112,18 @@ export const config = Object.freeze({
   },
 
   recommendationLimit: int('RECOMMENDATION_LIMIT', 10),
+
+  // Si el perfil no está en el modelo precalculado, se calcula su vector con
+  // los factores ALS ya entrenados + sus eventos (fold-in online).
+  alsOnline: {
+    enabled: bool('ALS_ONLINE_ENABLED', true),
+  },
+
+  // Último recurso si todavía no hay factores ALS exportados.
+  coldStart: {
+    enabled: bool('COLD_START_ENABLED', true),
+    categoryBoost: float('COLD_START_CATEGORY_BOOST', 2),
+  },
 });
 
 export const dataDir = path.isAbsolute(config.reviews.csvPath)

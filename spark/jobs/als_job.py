@@ -68,12 +68,16 @@ def build_interactions(spark):
         .agg(spark_max("event_weight").alias("rating"))
     )
 
+    # Los eventos de demostraciones anteriores pueden referirse a productos que
+    # ya no están en el catálogo. Se descartan antes de entrenar el modelo.
+    catalog = read_table(spark, "products").select("product_id").distinct()
     interactions = (
         reviews.unionByName(sessions)
         .groupBy("user_id", "product_id")
         .agg(avg("rating").alias("rating"))
         .filter(col("user_id").isNotNull() & col("product_id").isNotNull())
         .filter((col("rating") >= 0.5) & (col("rating") <= 5.0))
+        .join(catalog, on="product_id", how="inner")
     )
     return interactions.cache()
 
@@ -81,7 +85,7 @@ def build_interactions(spark):
 def finalize(spark, recommendations, products):
     window = Window.partitionBy("user_id").orderBy(col("score").desc(), col("product_id").asc())
     return (
-        recommendations.join(products, on="product_id", how="left")
+        recommendations.join(products, on="product_id", how="inner")
         .withColumn("rank", row_number().over(window).cast("int"))
         .filter(col("rank") <= TOP_N)
         .withColumn("generated_at", current_timestamp())
@@ -98,6 +102,13 @@ def labels_dataframe(spark, indexer, index_col, id_col):
 def write_recommendations(output):
     (output.write.format("org.apache.spark.sql.cassandra")
      .options(table="recommendations_spark", keyspace=KEYSPACE, **{"confirm.truncate": "true"})
+     .mode("overwrite").save())
+
+
+def write_item_factors(output):
+    """Exporta los vectores latentes para el fold-in online de perfiles nuevos."""
+    (output.write.format("org.apache.spark.sql.cassandra")
+     .options(table="als_item_factors", keyspace=KEYSPACE, **{"confirm.truncate": "true"})
      .mode("overwrite").save())
 
 
@@ -168,7 +179,21 @@ def main():
             candidates = candidates.join(seen, on=["user_id", "product_id"], how="left_anti")
             output = finalize(spark, candidates, products)
             write_recommendations(output)
+
+            item_factors = (
+                model.itemFactors
+                .select(
+                    col("id").cast("double").alias("product_idx"),
+                    col("features").cast("array<double>").alias("factors"),
+                )
+                .join(product_labels, on="product_idx")
+                .join(products, on="product_id", how="inner")
+                .withColumn("generated_at", current_timestamp())
+                .select("product_id", "factors", "title", "category", "price", "generated_at")
+            )
+            write_item_factors(item_factors)
             print("[als_job] Recomendaciones ALS guardadas en recommendations_spark")
+            print(f"[als_job] Factores de {item_factors.count()} items guardados en als_item_factors")
             return
         except Exception as error:  # noqa: BLE001 - cualquier fallo de ALS usa el fallback
             print(f"[als_job] ALS falló ({error}); usando fallback de popularidad")

@@ -30,7 +30,7 @@ docker exec \
     --conf spark.cassandra.connection.host="${CASSANDRA_HOST:-cassandra}" \
     --conf spark.cassandra.connection.port="${CASSANDRA_PORT:-9042}" \
     --conf spark.jars.ivy=/tmp/.ivy2 \
-    --conf spark.driver.memory=768m \
-    --conf spark.executor.memory=768m \
+    --conf spark.driver.memory=512m \
+    --conf spark.executor.memory=512m \
     --conf spark.sql.shuffle.partitions=8 \
     /opt/spark/jobs/als_job.py

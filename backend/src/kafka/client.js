@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Kafka } from 'kafkajs';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -16,18 +17,46 @@ export function getKafka() {
   return kafka;
 }
 
+let admin;
+
+/** Administrador reutilizado por los sondeos en vivo (evita reconectar cada petición). */
+export async function getAdmin() {
+  if (!admin) {
+    const instance = getKafka().admin();
+    await instance.connect();
+    admin = instance;
+  }
+  return admin;
+}
+
 export async function ensureTopic(topic = config.kafka.topic) {
-  const admin = getKafka().admin();
+  const instance = getKafka().admin();
   try {
-    await admin.connect();
-    await admin.createTopics({
+    await instance.connect();
+    await instance.createTopics({
       validateOnly: false,
       waitForLeaders: true,
       topics: [{ topic, numPartitions: 1, replicationFactor: 1 }],
     });
     logger.info('kafka', `Tópico disponible: ${topic}`);
   } finally {
-    await admin.disconnect();
+    await instance.disconnect();
+  }
+}
+
+/** Offset actual del tópico: sirve como contador de mensajes publicados. */
+export async function getTopicOffsets(topic = config.kafka.topic) {
+  try {
+    const instance = await getAdmin();
+    const offsets = await instance.fetchTopicOffsets(topic);
+    return offsets.map((entry) => ({
+      partition: entry.partition,
+      low: Number(entry.low),
+      high: Number(entry.high),
+    }));
+  } catch (error) {
+    admin = undefined;
+    throw error;
   }
 }
 
@@ -73,5 +102,20 @@ export function createConsumer() {
     rebalanceTimeout: 60_000,
     maxBytesPerPartition: 1_048_576,
     fromBeginning: true,
+  });
+}
+
+/**
+ * Consumidor fan-out para Server-Sent Events. Usa un grupo propio por proceso
+ * (nunca compartido con `rec-consumer`) y arranca en el offset más reciente:
+ * cada conexión recibe solo lo que ocurra después de conectarse.
+ */
+export function createEventStreamConsumer() {
+  return getKafka().consumer({
+    groupId: `${config.kafka.groupId}-sse-${process.pid}-${randomUUID().slice(0, 8)}`,
+    sessionTimeout: 30_000,
+    rebalanceTimeout: 60_000,
+    maxBytesPerPartition: 1_048_576,
+    fromBeginning: false,
   });
 }

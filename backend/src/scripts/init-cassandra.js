@@ -27,6 +27,7 @@ const TABLES = [
     price double,
     image text,
     rating double,
+    description text,
     PRIMARY KEY ((catalog_key), product_id)
   ) WITH CLUSTERING ORDER BY (product_id ASC)`,
 
@@ -62,6 +63,34 @@ const TABLES = [
     generated_at timestamp,
     PRIMARY KEY ((user_id), rank)
   ) WITH CLUSTERING ORDER BY (rank ASC)`,
+
+  // Factores latentes de los productos entrenados por ALS. Permite calcular
+  // recomendaciones para perfiles nuevos en tiempo real (fold-in online).
+  `CREATE TABLE IF NOT EXISTS ${KEYSPACE}.als_item_factors (
+    product_id text PRIMARY KEY,
+    factors list<double>,
+    title text,
+    category text,
+    price double,
+    generated_at timestamp
+  )`,
+
+  // Motor vecinal (Spark SQL sobre user_sessions): recomendaciones explicables
+  // por usuarios con productos en común, con el mismo formato que el grafo.
+  `CREATE TABLE IF NOT EXISTS ${KEYSPACE}.recommendations_spark_neighbors (
+    user_id text,
+    rank int,
+    product_id text,
+    title text,
+    category text,
+    price double,
+    score double,
+    neighbor_count int,
+    shared_products int,
+    example_neighbor text,
+    generated_at timestamp,
+    PRIMARY KEY ((user_id), rank)
+  ) WITH CLUSTERING ORDER BY (rank ASC)`,
 ];
 
 async function main() {
@@ -79,6 +108,13 @@ async function main() {
 
     for (const cql of TABLES) {
       await admin.execute(cql);
+    }
+    // Los esquemas ya creados no ganan columnas con CREATE TABLE IF NOT EXISTS.
+    try {
+      await admin.execute(`ALTER TABLE ${KEYSPACE}.products_by_catalog ADD description text`);
+      logger.info('cassandra', 'Columna description añadida a products_by_catalog');
+    } catch (error) {
+      if (!/already exists|duplicate/i.test(error.message)) throw error;
     }
     logger.info('cassandra', `${TABLES.length} tablas creadas/verificadas`);
   } finally {

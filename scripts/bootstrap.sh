@@ -23,10 +23,13 @@ echo "==> Creando keyspace/tablas y constraints del grafo"
 docker compose -f docker-compose.app.yml run --rm backend npm run init:cassandra
 docker compose -f docker-compose.app.yml run --rm backend npm run init:neo4j
 
-echo "==> Cruzando API de productos con 20 reseñas aleatorias por producto"
+echo "==> Cruzando 1000 productos del catálogo con 50 reseñas aleatorias por producto"
 docker compose -f docker-compose.app.yml run --rm backend npm run ingest
 
 echo "==> Calculando recomendaciones con Spark ALS"
 ./scripts/run-spark.sh
+
+echo "==> Calculando recomendaciones vecinales con Spark SQL"
+./scripts/run-neighbors.sh
 
 echo "Listo. Frontend: http://localhost:${FRONTEND_PORT:-5173} · API: http://localhost:${BACKEND_PORT:-4000}/api/health"

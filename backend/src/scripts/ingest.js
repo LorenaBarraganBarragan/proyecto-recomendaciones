@@ -4,7 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import AdmZip from 'adm-zip';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { config, dataDir } from '../config.js';
-import { batch } from '../db/cassandra.js';
+import { batch, execute } from '../db/cassandra.js';
 import { writeCypher, closeNeo4j } from '../db/neo4j.js';
 import { logger } from '../logger.js';
 import { closeCassandra } from '../db/cassandra.js';
@@ -17,8 +17,31 @@ import {
   makeRng,
   streamCsv,
 } from './review-utils.js';
+import { parseProductsCsv } from './product-utils.js';
 
 const CATALOG_KEY = 'default';
+const BATCH_MAX_BYTES = 32_000;
+const BATCH_MAX_STATEMENTS = 100;
+
+/** Agrupa sentencias por tamaño real: descripciones y reseñas pueden ser largas. */
+async function batchedWrite(statements) {
+  const sizeOf = (statement) => statement.query.length
+    + statement.params.reduce((total, value) => total + String(value ?? '').length + 8, 0);
+  let group = [];
+  let bytes = 0;
+
+  for (const statement of statements) {
+    const size = sizeOf(statement);
+    if (group.length && (bytes + size > BATCH_MAX_BYTES || group.length >= BATCH_MAX_STATEMENTS)) {
+      await batch(group);
+      group = [];
+      bytes = 0;
+    }
+    group.push(statement);
+    bytes += size;
+  }
+  if (group.length) await batch(group);
+}
 
 function createS3Client() {
   const { aws } = config;
@@ -106,7 +129,7 @@ async function resolveReviewSource() {
   );
 }
 
-async function fetchProducts() {
+async function fetchProductsFromApi() {
   const url = new URL(config.products.apiUrl);
   url.searchParams.set('limit', String(config.products.apiLimit));
   const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
@@ -128,7 +151,33 @@ async function fetchProducts() {
   }));
 }
 
+/** Catálogo: CSV público de 1.000 productos, con API de respaldo. */
+async function fetchProducts() {
+  if (config.products.dataUrl) {
+    try {
+      const response = await fetch(config.products.dataUrl, { signal: AbortSignal.timeout(60_000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const products = parseProductsCsv(await response.text(), config.products.count);
+      if (!products.length) throw new Error('el CSV de productos está vacío');
+      logger.info('ingest', `${products.length} productos leídos de ${config.products.dataUrl}`);
+      return { products, source: config.products.dataUrl };
+    } catch (error) {
+      logger.warn('ingest', `No se pudo leer el CSV de productos (${error.message}); se usa ${config.products.apiUrl}.`);
+    }
+  }
+
+  const products = await fetchProductsFromApi();
+  return { products, source: config.products.apiUrl };
+}
+
 async function persistProducts(products) {
+  // La ingesta define el catálogo completo: descartamos productos de corridas
+  // anteriores para que no aparezcan al paginar ni en la búsqueda.
+  await Promise.all([
+    execute(`TRUNCATE ${config.cassandra.keyspace}.products`),
+    execute(`TRUNCATE ${config.cassandra.keyspace}.products_by_catalog`),
+  ]);
+
   const statements = [];
   for (const product of products) {
     statements.push({
@@ -140,20 +189,19 @@ async function persistProducts(products) {
     });
     statements.push({
       query: `INSERT INTO ${config.cassandra.keyspace}.products_by_catalog
-        (catalog_key, product_id, title, category, price, image, rating)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (catalog_key, product_id, title, category, price, image, rating, description)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       params: [CATALOG_KEY, product.product_id, product.title, product.category,
-        product.price, product.image, product.rating],
+        product.price, product.image, product.rating, product.description],
     });
   }
 
-  for (let i = 0; i < statements.length; i += 100) {
-    await batch(statements.slice(i, i + 100));
-  }
+  await batchedWrite(statements);
   logger.info('ingest', `${products.length} productos persistidos en Cassandra`);
 }
 
 async function persistReviews(assignments) {
+  await execute(`TRUNCATE ${config.cassandra.keyspace}.product_reviews`);
   let total = 0;
   for (const [productId, reviews] of assignments) {
     const statements = reviews.map((review) => ({
@@ -163,7 +211,7 @@ async function persistReviews(assignments) {
       params: [productId, review.review_id, review.user_id, review.rating,
         review.review_text, review.profile_link],
     }));
-    await batch(statements);
+    await batchedWrite(statements);
     total += reviews.length;
   }
   logger.info('ingest', `${total} reseñas persistidas en Cassandra`);
@@ -171,6 +219,8 @@ async function persistReviews(assignments) {
 }
 
 async function persistGraph(products, assignments) {
+  // Las relaciones REVIEWED se recalculan por completo en cada ingesta.
+  await writeCypher('MATCH ()-[r:REVIEWED]->() DELETE r');
   const productRows = products.map((p) => ({
     product_id: p.product_id,
     title: p.title,
@@ -214,7 +264,7 @@ async function persistGraph(products, assignments) {
 async function main() {
   const started = Date.now();
   const source = await resolveReviewSource();
-  const products = await fetchProducts();
+  const { products, source: catalogSource } = await fetchProducts();
   const productIds = products.map((p) => p.product_id);
   const rng = makeRng(config.reviews.seed);
   const reservoir = createReservoir(config.reviews.poolSize, rng);
@@ -252,7 +302,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     durationMs: Date.now() - started,
     source: source.source,
-    catalog: { count: products.length, apiUrl: config.products.apiUrl },
+    catalog: { count: products.length, source: catalogSource },
     reviews: { scanned, pooled: reservoir.size, assigned, perProduct: config.reviews.perProduct },
     sampleUserIds,
   };

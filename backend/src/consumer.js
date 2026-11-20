@@ -43,12 +43,18 @@ async function updateGraph(event, timestamp) {
   await writeCypher(`
     MERGE (u:User {id: $userId})
     MERGE (p:Product {id: $productId})
-      ON CREATE SET p.title = $productId, p.category = 'unknown', p.price = 0.0
+      ON CREATE SET p.title = coalesce($productTitle, $productId),
+                    p.category = coalesce($productCategory, 'unknown'),
+                    p.price = 0.0
+      ON MATCH SET p.title = coalesce($productTitle, p.title),
+                   p.category = coalesce($productCategory, p.category)
     MERGE (u)-[r:${relationship}]->(p)
     SET r.event_type = $eventType, r.timestamp = $timestamp
   `, {
     userId: event.user_id,
     productId: event.product_id,
+    productTitle: typeof event.product_title === 'string' ? event.product_title.slice(0, 200) : null,
+    productCategory: typeof event.product_category === 'string' ? event.product_category.slice(0, 120) : null,
     eventType: event.event_type,
     timestamp: timestamp.toISOString(),
   });
