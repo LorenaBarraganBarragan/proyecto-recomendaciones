@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
-import { getMeta, getProducts, getReviews, postEvent } from './api.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getMeta, getProducts, getReviews, postEvent, useMocks } from './api.js';
 import ProductCatalog from './components/ProductCatalog.jsx';
 import ProductDetail from './components/ProductDetail.jsx';
 import RecommendationsPanel from './components/RecommendationsPanel.jsx';
 import ComparisonPanel from './components/ComparisonPanel.jsx';
-
-const EVENT_LABEL = { view: 'view', click: 'click', purchase: 'purchase' };
+import InteractionHistory from './components/InteractionHistory.jsx';
+import GraphExplorer from './components/GraphExplorer.jsx';
+import { emptyActivity, recordInteraction } from './session-activity.js';
 
 export default function App() {
   const [userId, setUserId] = useState('');
@@ -21,6 +22,9 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
+  const [sessions, setSessions] = useState(() => new Map());
+  const eventSequence = useRef(0);
+  const reviewRequest = useRef(0);
 
   const loadProducts = useCallback(async (nextCursor = null, reset = false) => {
     setCatalogLoading(true);
@@ -54,11 +58,22 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const fireEvent = useCallback(async (productId, eventType) => {
+  const fireEvent = useCallback(async (product, eventType) => {
     if (!userId) return;
+    const entry = {
+      id: ++eventSequence.current,
+      eventType,
+      productId: product.id,
+      title: product.title || product.id,
+      category: product.category,
+      timestamp: new Date().toISOString(),
+    };
     try {
-      await postEvent({ user_id: userId, product_id: productId, event_type: eventType });
-      setToast(`Evento ${EVENT_LABEL[eventType]} publicado en Kafka → ${productId}`);
+      await postEvent({ user_id: userId, product_id: product.id, event_type: eventType });
+      setSessions((previous) => recordInteraction(previous, userId, entry));
+      setToast(useMocks
+        ? `Evento simulado ${eventType} registrado → ${product.id}`
+        : `La API aceptó el evento ${eventType} → ${product.id}`);
       setRefreshKey((value) => value + 1);
     } catch (err) {
       setToast(`Error al publicar ${eventType}: ${err.message}`);
@@ -66,19 +81,28 @@ export default function App() {
   }, [userId]);
 
   const openProduct = useCallback(async (product) => {
+    const requestId = ++reviewRequest.current;
     setSelected(product);
     setReviews([]);
     setReviewsLoading(true);
+    void fireEvent(product, 'click');
     try {
       const data = await getReviews(product.id);
-      setReviews(data.items);
+      if (requestId === reviewRequest.current) setReviews(data.items);
     } catch (err) {
-      setToast(`No se pudieron cargar reseñas: ${err.message}`);
+      if (requestId === reviewRequest.current) setToast(`No se pudieron cargar reseñas: ${err.message}`);
     } finally {
-      setReviewsLoading(false);
+      if (requestId === reviewRequest.current) setReviewsLoading(false);
     }
-    await fireEvent(product.id, 'click');
   }, [fireEvent]);
+
+  const closeProduct = useCallback(() => {
+    reviewRequest.current += 1;
+    setSelected(null);
+  }, []);
+
+  const activity = sessions.get(userId) ?? emptyActivity;
+  const interactionHistory = <InteractionHistory userId={userId} interactions={activity.recent} simulated={useMocks} />;
 
   return (
     <div className="app">
@@ -87,7 +111,7 @@ export default function App() {
           <span className="logo">✦</span>
           <div>
             <h1>Motor de Recomendación Reactivo</h1>
-            <p>Kafka · Cassandra · Spark ALS · Neo4j</p>
+            <p>{useMocks ? 'Spark ALS · Grafo Neo4j' : 'Kafka · Cassandra · Spark ALS · Neo4j'}</p>
           </div>
         </div>
         <label className="user-picker">
@@ -97,27 +121,37 @@ export default function App() {
             onChange={(event) => setUserId(event.target.value)}
             placeholder="u_..."
             spellCheck="false"
+            list={useMocks ? 'demo-users' : undefined}
           />
+          {useMocks && (
+            <datalist id="demo-users">
+              {meta?.sampleUserIds.map((id) => <option key={id} value={id} />)}
+            </datalist>
+          )}
         </label>
       </header>
 
       <div className="subbar">
         <nav className="tabs">
-          <button type="button" className={tab === 'catalog' ? 'active' : ''} onClick={() => setTab('catalog')}>
+          <button type="button" className={tab === 'catalog' ? 'active' : ''} aria-pressed={tab === 'catalog'} onClick={() => setTab('catalog')}>
             Catálogo y recomendaciones
           </button>
-          <button type="button" className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}>
+          <button type="button" className={tab === 'compare' ? 'active' : ''} aria-pressed={tab === 'compare'} onClick={() => setTab('compare')}>
             Comparativa Spark vs. Grafo
+          </button>
+          <button type="button" className={tab === 'graph' ? 'active' : ''} aria-pressed={tab === 'graph'} onClick={() => setTab('graph')}>
+            Explorador de grafo
           </button>
         </nav>
         {meta?.ingestion && (
           <span className="muted meta-info">
             {meta.ingestion.catalogCount} productos · {meta.ingestion.reviewsAssigned} reseñas ·
-            ingesta {new Date(meta.ingestion.generatedAt).toLocaleString()}
+            {useMocks ? ' catálogo de prueba' : ` ingesta ${new Date(meta.ingestion.generatedAt).toLocaleString()}`}
           </span>
         )}
       </div>
 
+      {useMocks && <p className="demo-indicator">Modo demostración — datos simulados</p>}
       {error && <div className="alert">{error}</div>}
 
       {tab === 'catalog' ? (
@@ -133,18 +167,19 @@ export default function App() {
           </main>
           <aside>
             <RecommendationsPanel userId={userId} refreshKey={refreshKey} />
-            <section className="panel tips">
-              <h3>Cómo probarlo</h3>
-              <ol>
-                <li>Haz clic en un producto: se publica <code>click</code> y se abre el detalle.</li>
-                <li>Al abrir el detalle se envía <code>view</code>; el botón comprar envía <code>purchase</code>.</li>
-                <li>El consumidor actualiza Cassandra y Neo4j; las recomendaciones se recargan solas.</li>
-              </ol>
-            </section>
+            {interactionHistory}
           </aside>
         </div>
+      ) : tab === 'compare' ? (
+        <div className="comparison-view">
+          <ComparisonPanel userId={userId} refreshKey={refreshKey} />
+          {interactionHistory}
+        </div>
       ) : (
-        <ComparisonPanel userId={userId} refreshKey={refreshKey} />
+        <main className="graph-explorer">
+          <GraphExplorer userId={userId} activity={activity} simulated={useMocks} onBrowse={() => setTab('catalog')} />
+          {interactionHistory}
+        </main>
       )}
 
       {selected && (
@@ -152,7 +187,7 @@ export default function App() {
           product={selected}
           reviews={reviews}
           loading={reviewsLoading}
-          onClose={() => setSelected(null)}
+          onClose={closeProduct}
           onEvent={fireEvent}
         />
       )}

@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react';
+import { useMocks } from '../api.js';
+import ProductImage from './ProductImage.jsx';
 
 const Stars = ({ rating }) => (
   <span className="stars" aria-label={`${rating} de 5`}>
@@ -13,8 +15,8 @@ export default function ProductDetail({ product, reviews, loading, onClose, onEv
     // Un único view por producto, incluso con el doble montaje de StrictMode.
     if (viewedRef.current === product.id) return;
     viewedRef.current = product.id;
-    onEvent(product.id, 'view');
-  }, [product.id, onEvent]);
+    onEvent(product, 'view');
+  }, [product, onEvent]);
 
   useEffect(() => {
     const onKey = (event) => { if (event.key === 'Escape') onClose(); };
@@ -28,7 +30,7 @@ export default function ProductDetail({ product, reviews, loading, onClose, onEv
         <button className="modal-close" type="button" onClick={onClose} aria-label="Cerrar">×</button>
 
         <div className="modal-header">
-          {product.image && <img src={product.image} alt={product.title} />}
+          <ProductImage src={product.image} title={product.title} />
           <div>
             <span className="badge">{product.category}</span>
             <h2>{product.title}</h2>
@@ -37,8 +39,8 @@ export default function ProductDetail({ product, reviews, loading, onClose, onEv
               <Stars rating={Number(product.rating || 0)} />
               <strong>${Number(product.price || 0).toFixed(2)}</strong>
             </div>
-            <button className="primary" type="button" onClick={() => onEvent(product.id, 'purchase')}>
-              Comprar (publica purchase)
+            <button className="primary" type="button" onClick={() => onEvent(product, 'purchase')}>
+              {useMocks ? 'Simular compra' : 'Comprar (publica purchase)'}
             </button>
           </div>
         </div>
