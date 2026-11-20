@@ -1,0 +1,57 @@
+# Servicios de aplicación (backend, consumidor y frontend).
+# Se conectan a la red creada por docker-compose.yml.
+name: proyecto-recomendaciones
+
+networks:
+  bigdata-net:
+    name: bigdata-net
+    external: true
+
+services:
+  backend:
+    build: ./backend
+    image: proyecto-recomendaciones/backend:latest
+    container_name: rec-backend
+    env_file: .env
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      CASSANDRA_CONTACT_POINTS: cassandra
+      NEO4J_URI: bolt://neo4j:7687
+      PORT: 4000
+      HOME: /root
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    volumes:
+      - ./data:/app/data
+      # El SDK de AWS usa el perfil por defecto del host para leer S3.
+      - ${HOME}/.aws:/root/.aws:ro
+    networks:
+      - bigdata-net
+
+  consumer:
+    build: ./backend
+    image: proyecto-recomendaciones/backend:latest
+    container_name: rec-consumer
+    command: ["node", "src/consumer.js"]
+    env_file: .env
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      CASSANDRA_CONTACT_POINTS: cassandra
+      NEO4J_URI: bolt://neo4j:7687
+    networks:
+      - bigdata-net
+    depends_on:
+      - backend
+
+  frontend:
+    build: ./frontend
+    image: proyecto-recomendaciones/frontend:latest
+    container_name: rec-frontend
+    environment:
+      API_PROXY_TARGET: http://backend:4000
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    networks:
+      - bigdata-net
+    depends_on:
+      - backend
